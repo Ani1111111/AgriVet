@@ -3,37 +3,36 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from database import db
 from auth.models import User
 from products.models import Product
+from .schemas import ProductSchema  # <-- 1. Import schema and errors
+from marshmallow import ValidationError
 
 products_bp = Blueprint('products', __name__)
+product_schema = ProductSchema()  # Schema for creating/updating one product
+products_schema = ProductSchema(many=True) # Schema for listing many products
 
 def _require_admin():
     uid = get_jwt_identity()
     user = User.query.get(uid)
-    if not user or user.role != 'admin':
-        return None
-    return user
+    return user if user and user.role == 'admin' else None
 
 @products_bp.route('/products', methods=['POST'])
 @jwt_required()
 def create_product():
-    # admin-only
     if not _require_admin():
-        return jsonify({"error": "Admin only"}), 403
+        return jsonify({"error": "Admin access required"}), 403
 
-    data = request.get_json() or {}
-    if not data.get('name') or data.get('price') is None:
-        return jsonify({"error": "name and price are required"}), 400
+    json_data = request.get_json()
+    if not json_data:
+        return jsonify({"error": "No input data provided"}), 400
 
-    p = Product(
-        name=data['name'].strip(),
-        description=data.get('description'),
-        animal_type=data.get('animal_type'),
-        category=data.get('category'),
-        dosage_info=data.get('dosage_info'),
-        price=float(data.get('price', 0)),
-        stock=int(data.get('stock', 0)),
-        is_active=bool(data.get('is_active', True))
-    )
+    # 2. Validate and deserialize input
+    try:
+        data = product_schema.load(json_data)
+    except ValidationError as err:
+        return jsonify(err.messages), 400 # Return helpful errors
+
+    # 3. Create product with validated data
+    p = Product(**data) # Use dictionary unpacking
     db.session.add(p)
     db.session.commit()
     return jsonify({"message": "Product created", "id": p.id}), 201
@@ -42,7 +41,6 @@ def create_product():
 @products_bp.route('/products', methods=['GET'])
 def list_products():
     q = Product.query
-    # simple filters
     animal = request.args.get('animal_type')
     cat = request.args.get('category')
     if animal:
@@ -51,36 +49,34 @@ def list_products():
         q = q.filter_by(category=cat)
 
     items = q.filter_by(is_active=True).order_by(Product.id.desc()).all()
-    return jsonify([
-        {
-            "id": x.id, "name": x.name, "price": x.price, "stock": x.stock,
-            "animal_type": x.animal_type, "category": x.category
-        } for x in items
-    ]), 200
+    # Use the 'many=True' schema to format the output
+    return jsonify(products_schema.dump(items)), 200
 
 
 @products_bp.route('/products/<int:pid>', methods=['GET'])
 def get_product(pid):
     p = Product.query.get_or_404(pid)
-    return jsonify({
-        "id": p.id, "name": p.name, "description": p.description,
-        "animal_type": p.animal_type, "category": p.category,
-        "dosage_info": p.dosage_info, "price": p.price,
-        "stock": p.stock, "is_active": p.is_active
-    }), 200
+    return jsonify(product_schema.dump(p)), 200
 
 
 @products_bp.route('/products/<int:pid>', methods=['PATCH', 'PUT'])
 @jwt_required()
 def update_product(pid):
     if not _require_admin():
-        return jsonify({"error": "Admin only"}), 403
+        return jsonify({"error": "Admin access required"}), 403
 
     p = Product.query.get_or_404(pid)
-    data = request.get_json() or {}
-    for field in ["name","description","animal_type","category","dosage_info","price","stock","is_active"]:
-        if field in data:
-            setattr(p, field, data[field])
+    json_data = request.get_json()
+    
+    # Validate the incoming data. partial=True allows partial updates.
+    try:
+        data = product_schema.load(json_data, partial=True)
+    except ValidationError as err:
+        return jsonify(err.messages), 400
+
+    for key, value in data.items():
+        setattr(p, key, value)
+        
     db.session.commit()
     return jsonify({"message": "Product updated"}), 200
 
@@ -89,7 +85,7 @@ def update_product(pid):
 @jwt_required()
 def delete_product(pid):
     if not _require_admin():
-        return jsonify({"error": "Admin only"}), 403
+        return jsonify({"error": "Admin access required"}), 403
 
     p = Product.query.get_or_404(pid)
     db.session.delete(p)
